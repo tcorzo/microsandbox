@@ -272,6 +272,10 @@ sb, err := m.CreateSandbox(ctx, "api",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("api", image: "python", ports: { 8080 => 80 })
+```
+
 ```bash CLI
 msb create python --name api -p 8080:80
 ```

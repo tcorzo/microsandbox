@@ -2,6 +2,7 @@
 
 require "test/unit"
 require "securerandom"
+require "socket"
 require_relative "../lib/microsandbox"
 
 class MicrosandboxIntegrationTest < Test::Unit::TestCase
@@ -197,7 +198,50 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.kill
   end
 
+  def test_published_port_reaches_guest_listener
+    host_port = free_tcp_port
+    sandbox = create_sandbox("ports", ports: { host_port => 8000 })
+
+    assert_equal "published\n", published_reply(sandbox, host_port)
+  ensure
+    sandbox&.stop
+  end
+
+  def test_published_port_works_with_an_egress_allowlist
+    host_port = free_tcp_port
+    sandbox = create_sandbox(
+      "ports-allowlist",
+      ports: [{ host_port: host_port, guest_port: 8000, bind: "127.0.0.1", protocol: "tcp" }],
+      network: { allowed_hosts: ["example.com"], allowed_ports: [443] }
+    )
+
+    assert_equal "published\n", published_reply(sandbox, host_port)
+  ensure
+    sandbox&.stop
+  end
+
   private
+
+  def free_tcp_port
+    TCPServer.open("127.0.0.1", 0) { |server| server.addr[1] }
+  end
+
+  # The host listener accepts before the guest listens, so retry until the
+  # guest's reply arrives.
+  def published_reply(sandbox, host_port)
+    sandbox.exec_detached("sh", ["-c", "while true; do echo published | nc -l -p 8000; done"])
+    reply = nil
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 15
+    until reply == "published\n" || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      reply = begin
+        TCPSocket.open("127.0.0.1", host_port, &:read)
+      rescue SystemCallError
+        nil
+      end
+      sleep 0.2
+    end
+    reply
+  end
 
   def create_sandbox(label, **options)
     name = unique_name(label)

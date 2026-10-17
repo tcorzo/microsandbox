@@ -105,6 +105,58 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_match(/unknown keyword/, error.message)
   end
 
+  def test_ports_accepts_mapping_and_list_forms
+    # Option parsing runs before name validation, so reaching the name error
+    # means the ports parsed.
+    [
+      { 8080 => 80, 8443 => 443 },
+      [
+        { host_port: 8080, guest_port: 80 },
+        { host_port: 8080, guest_port: 80, bind: "0.0.0.0", protocol: "tcp" },
+        { host_port: 5353, guest_port: 53, bind: "::1", protocol: :udp }
+      ]
+    ].each do |ports|
+      assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Sandbox.create("", ports: ports) }
+    end
+  end
+
+  def test_ports_rejects_an_invalid_bind_address
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("ruby-test", ports: [{ host_port: 8080, guest_port: 80, bind: "localhost" }])
+    end
+
+    assert_equal "invalid bind address: localhost", error.message
+  end
+
+  def test_ports_rejects_an_invalid_protocol
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("ruby-test", ports: [{ host_port: 8080, guest_port: 80, protocol: "sctp" }])
+    end
+
+    assert_equal "invalid port protocol: sctp", error.message
+  end
+
+  def test_ports_rejects_an_unknown_entry_key
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("ruby-test", ports: [{ host_port: 8080, guest_port: 80, host: "0.0.0.0" }])
+    end
+
+    assert_equal "unknown keyword: :host", error.message
+  end
+
+  def test_ports_rejects_a_missing_port
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("ruby-test", ports: [{ host_port: 8080 }])
+    end
+
+    assert_equal "missing keyword: :guest_port", error.message
+  end
+
+  def test_ports_rejects_other_shapes
+    assert_raise(ArgumentError) { Microsandbox::Sandbox.create("ruby-test", ports: "8080:80") }
+    assert_raise(ArgumentError) { Microsandbox::Sandbox.create("ruby-test", ports: [[8080, 80]]) }
+  end
+
   def test_invalid_sandbox_name_is_reported_as_sdk_error
     error = assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Sandbox.create("") }
 
