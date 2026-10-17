@@ -4,6 +4,7 @@ use std::{
     ffi::c_void,
     future::Future,
     mem::ManuallyDrop,
+    net::IpAddr,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
@@ -28,10 +29,10 @@ use microsandbox_core::{
     logs::{LogEntry, LogOptions, LogSource},
     sandbox::{
         DestroyOptions, ExecOptionsBuilder, ExecOutput, FsEntry, FsEntryKind, FsMetadata,
-        NetworkPolicy, PullPolicy, RestartOptions, RlimitResource, Sandbox as CoreSandbox,
-        SandboxBuilder, SandboxFsOps, SandboxHandle as CoreSandboxHandle, SandboxMetrics,
-        SandboxPage, SandboxPingResult, SandboxStatus, SandboxStopResult, SandboxTouchResult,
-        SecretSource,
+        NetworkAction, NetworkPolicy, PullPolicy, RestartOptions, RlimitResource,
+        Sandbox as CoreSandbox, SandboxBuilder, SandboxFsOps, SandboxHandle as CoreSandboxHandle,
+        SandboxMetrics, SandboxPage, SandboxPingResult, SandboxStatus, SandboxStopResult,
+        SandboxTouchResult, SecretSource,
     },
     snapshot::{SaveOpts, Snapshot, SnapshotHandle},
     volume::{Volume, VolumeHandle, VolumeKind},
@@ -591,11 +592,68 @@ fn restricted_network_policy(ruby: &Ruby, value: Value) -> Result<NetworkPolicy,
     let ports: Vec<u16> = required_keyword::<RArray>(hash, "allowed_ports", ruby)?
         .to_vec::<u16>()
         .map_err(|_| argument_error(ruby, "allowed_ports must contain integers"))?;
+    // Ingress stays allowed so published ports keep working, matching the
+    // other SDKs' default-deny egress policies.
     NetworkPolicy::builder()
-        .default_deny()
+        .default_egress(NetworkAction::Deny)
+        .default_ingress(NetworkAction::Allow)
         .egress(|eg| eg.tcp().ports(ports).allow_domains(hosts))
         .build()
         .map_err(|e| core_error(ruby, MicrosandboxError::from(e)))
+}
+
+fn apply_ports(
+    ruby: &Ruby,
+    mut builder: SandboxBuilder,
+    value: Value,
+) -> Result<SandboxBuilder, Error> {
+    if let Some(mapping) = RHash::from_value(value) {
+        let mut pairs = Vec::with_capacity(mapping.len());
+        mapping.foreach(|host_port: u16, guest_port: u16| {
+            pairs.push((host_port, guest_port));
+            Ok(ForEach::Continue)
+        })?;
+        for (host_port, guest_port) in pairs {
+            builder = builder.port(host_port, guest_port);
+        }
+        return Ok(builder);
+    }
+
+    let entries = RArray::from_value(value).ok_or_else(|| {
+        argument_error(
+            ruby,
+            "ports must be a Hash of host_port => guest_port or an Array of Hashes",
+        )
+    })?;
+    for i in 0..entries.len() {
+        let entry: Value = entries.entry(i as isize)?;
+        let spec = RHash::from_value(entry)
+            .ok_or_else(|| argument_error(ruby, "ports entries must be Hashes"))?;
+        reject_unknown_keywords(ruby, spec, &["host_port", "guest_port", "bind", "protocol"])?;
+
+        let host_port = required_keyword::<u16>(spec, "host_port", ruby)?;
+        let guest_port = required_keyword::<u16>(spec, "guest_port", ruby)?;
+        let bind = keyword::<String>(spec, "bind")?.unwrap_or_else(|| "127.0.0.1".to_string());
+        let bind = bind
+            .parse::<IpAddr>()
+            .map_err(|_| argument_error(ruby, format!("invalid bind address: {bind}")))?;
+        let protocol = match spec.get(symbol("protocol")).filter(|v| !v.is_nil()) {
+            Some(v) => string_value(v, "protocol")?,
+            None => "tcp".to_string(),
+        };
+
+        builder = match protocol.as_str() {
+            "tcp" => builder.port_bind(bind, host_port, guest_port),
+            "udp" => builder.port_udp_bind(bind, host_port, guest_port),
+            other => {
+                return Err(argument_error(
+                    ruby,
+                    format!("invalid port protocol: {other}"),
+                ));
+            }
+        };
+    }
+    Ok(builder)
 }
 
 fn apply_secret_options(
@@ -793,6 +851,7 @@ fn apply_builder_options(
         "http",
         "intercept_tls",
         "network",
+        "ports",
         "proxy",
         "secrets",
         "quiet_logs",
@@ -871,6 +930,9 @@ fn apply_builder_options(
             let policy = restricted_network_policy(ruby, net)?;
             builder = builder.network(|n| n.policy(policy));
         }
+    }
+    if let Some(v) = kwargs.get(symbol("ports")) {
+        builder = apply_ports(ruby, builder, v)?;
     }
     if let Some(http) = keyword::<RHash>(kwargs, "http")? {
         reject_unknown_keywords(

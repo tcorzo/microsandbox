@@ -174,6 +174,18 @@ the real value only for the allowed TLS hostname. Secret values persist in
 host-side sandbox configuration, so load them from a secret manager, never log
 them, and rotate them after suspected host compromise.
 
+Publish guest ports on the host with `ports:`. A hash maps host ports to guest
+ports over TCP on `127.0.0.1`. An array of hashes also takes `bind:` and
+`protocol:` (`"tcp"` or `"udp"`):
+
+```ruby
+sandbox = Microsandbox::Sandbox.create(
+  "api",
+  image: "python",
+  ports: [{ host_port: 8080, guest_port: 8000, bind: "0.0.0.0" }]
+)
+```
+
 Route outbound TCP through an HTTP CONNECT proxy with
 `proxy: Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")`. The
 microsandbox host resolves and checks each destination before opening the
@@ -204,8 +216,8 @@ Snapshot archive operations are currently local-only. With the cloud backend, `s
 ## Supported surface
 
 The gem supports sandbox lifecycle operations, collected exec and shell
-output, SSH exec, logs, metrics, guest filesystem operations, local image,
-volume, and snapshot management, local or cloud backend selection, and typed
+output, SSH exec, logs, metrics, guest filesystem operations, published ports,
+local image, volume, and snapshot management, local or cloud backend selection, and typed
 error classes (see [Errors](#errors)).
 
 SSH exec inherits the global inactivity timeout by default. Override it for a
