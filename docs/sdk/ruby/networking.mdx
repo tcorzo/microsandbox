@@ -39,6 +39,48 @@ sandbox = Microsandbox::Sandbox.create(
 
 </Accordion>
 
+### ports
+
+Publish guest ports on the host. Local-only. Use a hash of `host_port => guest_port` for TCP on `127.0.0.1`, or an array of hashes with the fields below. Unknown fields, an invalid bind address, or an unknown protocol raise ArgumentError.
+
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>host_port</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Host port to listen on.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guest_port</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Guest port to forward to.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>bind</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Host IP address to bind. Defaults to <code>127.0.0.1</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>protocol</code><span className="msb-type">String | Symbol</span></div>
+    <div className="msb-param-desc"><code>tcp</code> or <code>udp</code>. Defaults to <code>tcp</code>.</div>
+  </div>
+</div>
+
+<Accordion title="Example">
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("api", image: "python", ports: { 8080 => 80 })
+
+sandbox = Microsandbox::Sandbox.create(
+  "dns",
+  image: "alpine",
+  ports: [
+    { host_port: 8080, guest_port: 80, bind: "0.0.0.0" },
+    { host_port: 5353, guest_port: 53, protocol: "udp" }
+  ]
+)
+```
+
+</Accordion>
+
 ### secrets
 
 An array of hashes. Each entry requires all three string fields below. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
