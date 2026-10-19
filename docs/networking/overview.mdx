@@ -222,6 +222,20 @@ sb, err := m.CreateSandbox(ctx, "restricted-worker",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "restricted-worker",
+  image: "alpine",
+  network: {
+    default_egress: :deny,
+    rules: [
+      Microsandbox::Rule.allow(destination: Microsandbox::Destination.group(:public), protocol: :tcp, port: 443),
+      *Microsandbox::Rule.allow_dns
+    ]
+  }
+)
+```
+
 ```bash CLI
 msb create alpine --name restricted-worker \
   --net-default-egress deny \
@@ -524,7 +538,7 @@ msb create python --name devbox --net "public,host"
 
 ## Reference
 
-For exact network APIs, see [TypeScript](/sdk/typescript/networking), [Rust](/sdk/rust/networking), [Python](/sdk/python/networking), or [Go](/sdk/go/networking). For CLI flags and configuration fields, see [Sandbox commands](/cli/sandbox-commands#network-profiles) and [Sandbox configuration](/cli/configuration#network).
+For exact network APIs, see [TypeScript](/sdk/typescript/networking), [Rust](/sdk/rust/networking), [Python](/sdk/python/networking), [Go](/sdk/go/networking), or [Ruby](/sdk/ruby/networking). For CLI flags and configuration fields, see [Sandbox commands](/cli/sandbox-commands#network-profiles) and [Sandbox configuration](/cli/configuration#network).
 
 ## Next
 

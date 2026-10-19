@@ -176,6 +176,96 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_match(/not a host!/, error.message)
   end
 
+  def test_network_rules_accept_every_destination_form
+    # Policy parsing runs before name validation, so reaching the name error
+    # means the policy built.
+    [
+      { rules: [] },
+      { default_egress: :allow, default_ingress: "deny" },
+      { rules: [*Microsandbox::Rule.allow_dns, { action: :allow, destination: "172.28.0.0/16" }] },
+      {
+        rules: [
+          { action: "allow", destination: "*" },
+          { action: :allow, destination: "10.0.0.5", protocol: :tcp, port: 4318 },
+          { action: :allow, destination: "api.example.com", protocol: "tcp", port: "8000-9000" },
+          { action: :allow, destination: ".github.com", port: 443 },
+          { action: :allow, destination: "suffix=githubusercontent.com" },
+          { action: :allow, destination: "domain=host.example.com" },
+          { action: :deny, destination: "metadata" },
+          { action: :deny, direction: :any, destination: :multicast },
+          { action: :allow, direction: :ingress, destination: "loopback", protocol: :udp },
+          { action: :allow, destination: Microsandbox::Destination.group("link-local"), protocol: :icmpv4 },
+          { action: :allow, destination: Microsandbox::Destination.group(:link_local), protocol: :icmpv6 },
+          Microsandbox::Rule.allow(destination: Microsandbox::Destination.any),
+          Microsandbox::Rule.allow(destination: Microsandbox::Destination.ip("::1")),
+          Microsandbox::Rule.allow(destination: Microsandbox::Destination.cidr("fd00::/8")),
+          Microsandbox::Rule.allow(destination: Microsandbox::Destination.domain("example.com")),
+          Microsandbox::Rule.allow(destination: Microsandbox::Destination.domain_suffix("example.org")),
+          Microsandbox::Rule.deny(destination: Microsandbox::Destination.group(:private)),
+          Microsandbox::Rule.allow(destination: { kind: "domain-suffix", value: "example.net" }),
+          *Microsandbox::Rule.deny_dns
+        ]
+      }
+    ].each do |network|
+      assert_raise(Microsandbox::InvalidConfigError) { Microsandbox::Sandbox.create("", network: network) }
+    end
+  end
+
+  def test_rule_factories_build_rule_hashes
+    assert_equal(
+      [
+        { action: :allow, direction: :egress, destination: { kind: :group, value: :host }, protocol: :udp, port: 53 },
+        { action: :allow, direction: :egress, destination: { kind: :group, value: :host }, protocol: :tcp, port: 53 }
+      ],
+      Microsandbox::Rule.allow_dns
+    )
+    assert_equal %i[deny deny], Microsandbox::Rule.deny_dns.map { |rule| rule[:action] }
+    assert_equal(
+      { action: :deny, direction: :ingress, destination: { kind: :cidr, value: "10.0.0.0/8" }, port: "80-90" },
+      Microsandbox::Rule.deny(direction: :ingress, destination: Microsandbox::Destination.cidr("10.0.0.0/8"), port: "80-90")
+    )
+  end
+
+  def test_network_rules_reject_invalid_values
+    [
+      [{ rules: [{ direction: :egress }] }, ArgumentError, "missing keyword: :action"],
+      [{ rules: [{ action: :permit }] }, ArgumentError, "unknown rule action: permit"],
+      [{ default_egress: :drop }, ArgumentError, "unknown default_egress: drop"],
+      [{ default_ingress: "block" }, ArgumentError, "unknown default_ingress: block"],
+      [{ rules: [{ action: :allow, direction: :sideways }] }, ArgumentError, "unknown direction: sideways"],
+      [{ rules: [{ action: :allow, protocol: :sctp }] }, ArgumentError, "unknown protocol: sctp"],
+      [{ rules: [{ action: :allow, port: "9000-8000" }] }, ArgumentError, "invalid port or port range: 9000-8000"],
+      [{ rules: [{ action: :allow, port: "typo" }] }, ArgumentError, "invalid port or port range: typo"],
+      [{ rules: [{ action: :allow, port: 70_000 }] }, ArgumentError, "invalid port or port range: 70000"],
+      [{ rules: [{ action: :allow, port: 1.5 }] }, TypeError, "port must be an Integer or String"],
+      [{ rules: [{ action: :allow, destination: { kind: :group, value: :lan } }] }, ArgumentError, "unknown destination group: lan"],
+      [{ rules: [{ action: :allow, destination: { kind: :subnet, value: "x" } }] }, ArgumentError, "unknown destination kind: subnet"],
+      [{ rules: [{ action: :allow, destination: { kind: :cidr } }] }, ArgumentError, "value is required for destination kind `cidr`"],
+      [{ rules: [{ action: :allow, destination: 42 }] }, TypeError, "destination must be a String, Symbol, or Hash"],
+      [{ rules: [{ action: :allow, dest: "x" }] }, ArgumentError, "unknown keyword: :dest"],
+      [{ rules: "allow" }, ArgumentError, "rules must be an Array of Hashes"],
+      [{ rules: ["allow"] }, ArgumentError, "rules entries must be Hashes"],
+      [{ allowed_hosts: ["example.com"], allowed_ports: [443], rules: [] }, ArgumentError, "unknown keyword: :allowed_hosts"]
+    ].each do |network, error_class, message|
+      error = assert_raise(error_class) { Microsandbox::Sandbox.create("ruby-test", network: network) }
+      assert_equal message, error.message
+    end
+  end
+
+  def test_network_rule_destinations_are_validated_by_the_policy_builder
+    [
+      [[{ action: :allow, destination: "public" }, { action: :allow, destination: "10.0.0.0/33" }], "rule #1: invalid CIDR `10.0.0.0/33`"],
+      [[{ action: :allow, destination: Microsandbox::Destination.ip("10.0.0.300") }], "rule #0: invalid IP address `10.0.0.300`"],
+      [[{ action: :allow, destination: "suffix=com" }], "rule #0: invalid domain `com`"],
+      [[{ action: :allow, direction: :ingress, protocol: :icmpv4 }], "rule #0"]
+    ].each do |rules, message|
+      error = assert_raise(Microsandbox::NetworkPolicyError) do
+        Microsandbox::Sandbox.create("ruby-test", network: { rules: rules })
+      end
+      assert_include error.message, message
+    end
+  end
+
   def test_typed_error_is_rescued_by_base_error
     rescued = begin
       Microsandbox::Sandbox.create("")

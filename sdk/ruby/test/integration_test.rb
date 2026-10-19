@@ -49,6 +49,51 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  def test_network_cidr_rule_reaches_a_private_host_address
+    address = Socket.ip_address_list.find(&:ipv4_private?)&.ip_address
+    omit("no private IPv4 address on this host") unless address
+
+    with_host_listener(address) do |port|
+      allowlisted = create_sandbox(
+        "net-cidr-allowlist",
+        network: { allowed_hosts: ["example.com"], allowed_ports: [port] }
+      )
+      ruled = create_sandbox(
+        "net-cidr-rule",
+        network: { rules: [{ action: :allow, destination: "#{address}/32", protocol: :tcp, port: port }] }
+      )
+
+      assert_equal "", guest_read(allowlisted, address, port)
+      assert_equal "reached\n", guest_read(ruled, address, port)
+    ensure
+      allowlisted&.stop
+      ruled&.stop
+    end
+  end
+
+  def test_network_host_group_rule_reaches_host_loopback
+    with_host_listener("127.0.0.1") do |port|
+      allowlisted = create_sandbox(
+        "net-host-allowlist",
+        network: { allowed_hosts: ["host.microsandbox.internal"], allowed_ports: [port] }
+      )
+      ruled = create_sandbox(
+        "net-host-rule",
+        network: {
+          rules: [
+            Microsandbox::Rule.allow(destination: Microsandbox::Destination.group(:host), protocol: :tcp, port: port)
+          ]
+        }
+      )
+
+      assert_equal "", guest_read(allowlisted, "host.microsandbox.internal", port)
+      assert_equal "reached\n", guest_read(ruled, "host.microsandbox.internal", port)
+    ensure
+      allowlisted&.stop
+      ruled&.stop
+    end
+  end
+
   def test_tls_proxy_substitutes_secret_without_exposing_plaintext_in_guest
     secret = "ruby-secret-#{SecureRandom.hex(8)}"
     sandbox = create_sandbox(
@@ -241,6 +286,27 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
       sleep 0.2
     end
     reply
+  end
+
+  def with_host_listener(bind)
+    server = TCPServer.new(bind, 0)
+    thread = Thread.new do
+      loop do
+        client = server.accept
+        client.write("reached\n")
+        client.close
+      end
+    rescue IOError
+      nil
+    end
+    yield server.addr[1]
+  ensure
+    server&.close
+    thread&.join(1)
+  end
+
+  def guest_read(sandbox, host, port)
+    sandbox.shell("nc -w 5 #{host} #{port} </dev/null").stdout
   end
 
   def create_sandbox(label, **options)

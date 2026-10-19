@@ -12,20 +12,66 @@ Use these keywords with `Sandbox.create`, `Sandbox.connect_or_create`, or `Sandb
 
 ### network
 
-Use `:none` to disable networking, or a hash containing both `allowed_hosts` and `allowed_ports`.
+Use `:none` to disable networking, an allowlist hash with both `allowed_hosts` and `allowed_ports`, or a policy hash with any of `default_egress`, `default_ingress`, and `rules`. A hash cannot mix allowlist and policy fields.
 
-<p className="msb-label">Fields</p>
+<p className="msb-label">Allowlist fields</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>allowed_hosts</code><span className="msb-type">Array&lt;String&gt;</span></div>
-    <div className="msb-param-desc">Allowed destination hosts.</div>
+    <div className="msb-param-desc">Allowed destination hosts, matched exactly.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>allowed_ports</code><span className="msb-type">Array&lt;Integer&gt;</span></div>
-    <div className="msb-param-desc">Allowed destination ports. Both host and port restrictions must match.</div>
+    <div className="msb-param-desc">Allowed destination TCP ports. Both host and port restrictions must match.</div>
   </div>
 </div>
+
+<p className="msb-label">Policy fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>default_egress</code><span className="msb-type">String | Symbol</span></div>
+    <div className="msb-param-desc"><code>allow</code> or <code>deny</code> for outbound traffic no rule matches. Defaults to <code>deny</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>default_ingress</code><span className="msb-type">String | Symbol</span></div>
+    <div className="msb-param-desc"><code>allow</code> or <code>deny</code> for inbound traffic no rule matches. Defaults to <code>allow</code>, which keeps published ports reachable.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rules</code><span className="msb-type">Array&lt;Hash&gt;</span></div>
+    <div className="msb-param-desc">Ordered rules; the first match wins. Each rule takes the fields below.</div>
+  </div>
+</div>
+
+<p className="msb-label">Rule fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>action</code><span className="msb-type">String | Symbol</span></div>
+    <div className="msb-param-desc">Required. <code>allow</code> or <code>deny</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>direction</code><span className="msb-type">String | Symbol</span></div>
+    <div className="msb-param-desc"><code>egress</code>, <code>ingress</code>, or <code>any</code>. Defaults to <code>egress</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>destination</code><span className="msb-type">String | Symbol | Hash</span></div>
+    <div className="msb-param-desc">A <a href="#destination">Destination</a> hash, or shorthand: a group name, an IP address, a CIDR range, a domain, a domain suffix starting with <code>.</code> or <code>suffix=</code>, <code>domain=</code> followed by a domain, or <code>*</code> for any. Defaults to any destination.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>protocol</code><span className="msb-type">String | Symbol</span></div>
+    <div className="msb-param-desc"><code>tcp</code>, <code>udp</code>, <code>icmpv4</code>, or <code>icmpv6</code>. Defaults to every protocol. ICMP rules must be egress-only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">Integer | String</span></div>
+    <div className="msb-param-desc">A single port, such as <code>443</code>, or an inclusive range, such as <code>"8000-9000"</code>. Defaults to every port.</div>
+  </div>
+</div>
+
+Invalid policy fields raise ArgumentError or TypeError. Invalid IP addresses, CIDR ranges, and domain names raise `NetworkPolicyError`.
+
+DNS lookups are egress too. A name resolves only when a domain rule matches it or a rule such as [`Rule.allow_dns`](#rule-allow_dns) allows the gateway's port 53. DNS rebind protection drops an answer with a private address unless a CIDR or group egress rule without a `port` allows that address.
 
 <Accordion title="Example">
 
@@ -34,6 +80,18 @@ sandbox = Microsandbox::Sandbox.create(
   "worker",
   image: "alpine",
   network: { allowed_hosts: ["api.example.com"], allowed_ports: [443] }
+)
+
+sandbox = Microsandbox::Sandbox.create(
+  "collector-client",
+  image: "alpine",
+  network: {
+    rules: [
+      *Microsandbox::Rule.allow_dns,
+      { action: :allow, destination: "172.28.0.0/16", protocol: :tcp },
+      { action: :allow, destination: ".github.com", protocol: :tcp, port: 443 }
+    ]
+  }
 )
 ```
 
@@ -117,6 +175,120 @@ sandbox = Microsandbox::Sandbox.create(
 ### proxy
 
 Accepts an `OutboundProxy`. The same object can be passed to `builder.proxy(proxy)`.
+
+## Rule
+
+These helpers return rule hashes for the `rules` field of [network](#network).
+
+#### <span className="msb-recv">Microsandbox::Rule.</span><span className="msb-hn">allow()</span>
+
+```ruby
+Microsandbox::Rule.allow(direction: :egress, protocol: nil, port: nil, destination: nil) # => Hash
+```
+
+Build an allow rule. Omitted fields match everything.
+
+#### <span className="msb-recv">Microsandbox::Rule.</span><span className="msb-hn">deny()</span>
+
+```ruby
+Microsandbox::Rule.deny(direction: :egress, protocol: nil, port: nil, destination: nil) # => Hash
+```
+
+Build a deny rule. Omitted fields match everything.
+
+#### <span className="msb-recv">Microsandbox::Rule.</span><span className="msb-hn">allow_dns()</span>
+
+```ruby
+Microsandbox::Rule.allow_dns # => Array<Hash>
+```
+
+Allow plain DNS to the sandbox gateway. Returns a UDP/53 rule and a TCP/53 rule for the `host` group; splat them into `rules`. DoT (TCP/853) is not included.
+
+<Accordion title="Example">
+
+```ruby
+sandbox = Microsandbox::Sandbox.create(
+  "worker",
+  image: "alpine",
+  network: {
+    rules: [
+      *Microsandbox::Rule.allow_dns,
+      Microsandbox::Rule.allow(destination: Microsandbox::Destination.group(:public), protocol: :tcp, port: 443)
+    ]
+  }
+)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">Microsandbox::Rule.</span><span className="msb-hn">deny_dns()</span>
+
+```ruby
+Microsandbox::Rule.deny_dns # => Array<Hash>
+```
+
+Deny gateway UDP/53 and TCP/53.
+
+## Destination
+
+These helpers return destination hashes of the form `{ kind:, value: }`. Unlike a shorthand String, they are never reinterpreted, so `Destination.cidr("example.com")` fails instead of becoming a domain rule.
+
+#### <span className="msb-recv">Microsandbox::Destination.</span><span className="msb-hn">any()</span>
+
+```ruby
+Microsandbox::Destination.any # => Hash
+```
+
+Match any destination.
+
+#### <span className="msb-recv">Microsandbox::Destination.</span><span className="msb-hn">ip()</span>
+
+```ruby
+Microsandbox::Destination.ip(ip) # => Hash
+```
+
+Match one IPv4 or IPv6 address.
+
+#### <span className="msb-recv">Microsandbox::Destination.</span><span className="msb-hn">cidr()</span>
+
+```ruby
+Microsandbox::Destination.cidr(cidr) # => Hash
+```
+
+Match a CIDR range, such as `172.28.0.0/16`.
+
+#### <span className="msb-recv">Microsandbox::Destination.</span><span className="msb-hn">domain()</span>
+
+```ruby
+Microsandbox::Destination.domain(domain) # => Hash
+```
+
+Match one domain exactly.
+
+#### <span className="msb-recv">Microsandbox::Destination.</span><span className="msb-hn">domain_suffix()</span>
+
+```ruby
+Microsandbox::Destination.domain_suffix(suffix) # => Hash
+```
+
+Match a domain and all of its subdomains. `domain_suffix("github.com")` matches `github.com` and `api.github.com`. A single label such as `com` is rejected. Use this instead of a `*.github.com` pattern, which is read as a literal name.
+
+#### <span className="msb-recv">Microsandbox::Destination.</span><span className="msb-hn">group()</span>
+
+```ruby
+Microsandbox::Destination.group(group) # => Hash
+```
+
+Match an address group.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>group</code><span className="msb-type">String | Symbol</span></div>
+    <div className="msb-param-desc"><code>public</code>, <code>private</code>, <code>loopback</code>, <code>link-local</code> (or <code>link_local</code>), <code>metadata</code>, <code>multicast</code>, or <code>host</code>. <code>host</code> is the host machine as <code>host.microsandbox.internal</code>; <code>loopback</code> is the sandbox's own <code>127.0.0.1</code>.</div>
+  </div>
+</div>
 
 ## OutboundProxy
 
