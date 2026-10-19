@@ -41,7 +41,7 @@ sandbox = Microsandbox::Sandbox.create(
 
 ### secrets
 
-An array of hashes. Each entry requires all three string fields below. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
+An array of hashes, one per guest environment variable. Each entry requires `env`, `value`, and either `allowed_hosts` or `allowed_host`. Two entries with the same `env` raise `ArgumentError`. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
 
 <p className="msb-label">Fields</p>
 
@@ -55,8 +55,12 @@ An array of hashes. Each entry requires all three string fields below. Ruby does
     <div className="msb-param-desc">Secret value to substitute into permitted requests.</div>
   </div>
   <div className="msb-param">
+    <div className="msb-param-key"><code>allowed_hosts</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Exact hosts or wildcard patterns, such as `*.example.com`, allowed to receive the real value. At least one host is required.</div>
+  </div>
+  <div className="msb-param">
     <div className="msb-param-key"><code>allowed_host</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Destination host allowed to receive the secret.</div>
+    <div className="msb-param-desc">Single-host form of `allowed_hosts`. Set one of the two.</div>
   </div>
 </div>
 
@@ -66,7 +70,11 @@ An array of hashes. Each entry requires all three string fields below. Ruby does
 sandbox = Microsandbox::Sandbox.create(
   "worker",
   image: "alpine",
-  secrets: [{ env: "API_TOKEN", value: ENV.fetch("API_TOKEN"), allowed_host: "api.example.com" }]
+  secrets: [{
+    env: "GITHUB_TOKEN",
+    value: ENV.fetch("GITHUB_TOKEN"),
+    allowed_hosts: ["github.com", "api.github.com"]
+  }]
 )
 ```
 
