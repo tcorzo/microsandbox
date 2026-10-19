@@ -41,7 +41,7 @@ sandbox = Microsandbox::Sandbox.create(
 
 ### secrets
 
-An array of hashes, one per guest environment variable. Each entry requires `env`, `value`, and either `allowed_hosts` or `allowed_host`. Two entries with the same `env` raise `ArgumentError`. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
+An array of hashes, one per guest environment variable. Each entry requires `env`, exactly one of `value` or `source`, and either `allowed_hosts` or `allowed_host`. Two entries with the same `env` raise `ArgumentError`. Ruby does not expose per-location substitution, violation-action, or passthrough-policy configuration.
 
 <p className="msb-label">Fields</p>
 
@@ -52,7 +52,11 @@ An array of hashes, one per guest environment variable. Each entry requires `env
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>value</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Secret value to substitute into permitted requests.</div>
+    <div className="msb-param-desc">Secret value to substitute into permitted requests. Stored in the host-side sandbox configuration.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>source</code><span className="msb-type">SecretSource</span></div>
+    <div className="msb-param-desc">Host-side reference to the value. The sandbox configuration stores only the reference; the process that starts or restarts the sandbox reads the value from its own environment. Raises InvalidConfigError if the variable is unset or empty at that point.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>allowed_hosts</code><span className="msb-type">Array&lt;String&gt;</span></div>
@@ -72,7 +76,7 @@ sandbox = Microsandbox::Sandbox.create(
   image: "alpine",
   secrets: [{
     env: "GITHUB_TOKEN",
-    value: ENV.fetch("GITHUB_TOKEN"),
+    source: Microsandbox::SecretSource.env("GITHUB_TOKEN"),
     allowed_hosts: ["github.com", "api.github.com"]
   }]
 )
@@ -214,7 +218,7 @@ The bang forms `user_id!` and `credentials!` mutate the proxy and return `nil`.
 Microsandbox::SecretSource.env(name) # => SecretSource
 ```
 
-Read a secret from a host environment variable. Ruby exposes this source for proxy authentication.
+Read a secret from a host environment variable. Accepted by `secrets` entries and proxy credentials.
 
 <p className="msb-label">Parameters</p>
 
