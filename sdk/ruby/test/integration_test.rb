@@ -137,6 +137,41 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  def test_tls_proxy_substitutes_secret_read_from_host_environment
+    secret = "ruby-secret-#{SecureRandom.hex(8)}"
+    variable = "MSB_RUBY_TEST_SECRET_#{SecureRandom.hex(4).upcase}"
+    ENV[variable] = secret
+    sandbox = create_sandbox(
+      "secret-env",
+      network: { allowed_hosts: ["httpbingo.org"], allowed_ports: [443] },
+      secrets: [{ env: "API_KEY", source: Microsandbox::SecretSource.env(variable), allowed_host: "httpbingo.org" }]
+    )
+
+    guest_env = sandbox.shell('printf "%s" "$API_KEY"')
+    response = sandbox.shell(
+      'for attempt in 1 2 3; do wget -qO- --timeout=15 --header="Authorization: Bearer $API_KEY" https://httpbingo.org/headers && break; sleep 1; done'
+    )
+
+    assert_equal "$MSB_API_KEY", guest_env.stdout
+    assert_include response.stdout, secret
+  ensure
+    ENV.delete(variable)
+    sandbox&.stop
+  end
+
+  def test_secret_source_requires_the_host_environment_variable
+    variable = "MSB_RUBY_TEST_UNSET_#{SecureRandom.hex(4).upcase}"
+
+    error = assert_raise(Microsandbox::InvalidConfigError) do
+      create_sandbox(
+        "secret-unset",
+        secrets: [{ env: "API_KEY", source: Microsandbox::SecretSource.env(variable), allowed_host: "httpbingo.org" }]
+      )
+    end
+
+    assert_include error.message, "host environment variable #{variable} is not set"
+  end
+
   def test_gc_stops_owned_sandbox_and_detach_keeps_it_running
     owned_name = unique_name("gc-owned")
     @names << owned_name

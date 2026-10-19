@@ -163,7 +163,7 @@ sandbox = Microsandbox::Sandbox.create(
   network: { allowed_hosts: ["api.example.com"], allowed_ports: [443] },
   secrets: [{
     env: "API_KEY",
-    value: ENV.fetch("API_KEY"),
+    source: Microsandbox::SecretSource.env("API_KEY"),
     allowed_hosts: ["api.example.com"]
   }]
 )
@@ -196,9 +196,11 @@ The guest receives a placeholder for each secret. The host proxy substitutes
 the real value only for the allowed TLS hostnames. List every host for a
 secret in one entry's `allowed_hosts`; two entries for the same `env` raise
 `ArgumentError`. `allowed_host: "api.example.com"` remains a single-host
-form. Secret values persist in host-side sandbox configuration, so load them
-from a secret manager, never log them, and rotate them after suspected host
-compromise.
+form. With `source:`, the sandbox configuration stores only the environment
+variable name, and the process that starts or restarts the sandbox reads the
+value from its own environment. A `value:` string is stored verbatim in
+host-side sandbox configuration instead, so never log it and rotate it after
+suspected host compromise.
 
 Publish guest ports on the host with `ports:`. A hash maps host ports to guest
 ports over TCP on `127.0.0.1`. An array of hashes also takes `bind:` and

@@ -145,6 +145,38 @@ class MicrosandboxTest < Test::Unit::TestCase
     end
   end
 
+  def test_secret_rejects_value_and_source_together
+    source = Microsandbox::SecretSource.env("HOST_API_KEY")
+
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create(
+        "ruby-test",
+        secrets: [{ env: "API_KEY", value: "inline", source: source, allowed_host: "api.example.com" }]
+      )
+    end
+
+    assert_equal 'secret "API_KEY": "value" and "source" are mutually exclusive; set at most one', error.message
+  end
+
+  def test_secret_requires_value_or_source
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("ruby-test", secrets: [{ env: "API_KEY", allowed_host: "api.example.com" }])
+    end
+
+    assert_equal 'secret "API_KEY": set "value" or "source"', error.message
+  end
+
+  def test_secret_source_must_be_a_secret_source
+    error = assert_raise(TypeError) do
+      Microsandbox::Sandbox.create(
+        "ruby-test",
+        secrets: [{ env: "API_KEY", source: { env: "HOST_API_KEY" }, allowed_host: "api.example.com" }]
+      )
+    end
+
+    assert_equal 'secret "API_KEY": "source" must be a Microsandbox::SecretSource', error.message
+  end
+
   def test_create_accepts_proxy_keyword
     proxy = Microsandbox::OutboundProxy.socks5("not-an-address")
 

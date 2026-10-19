@@ -947,6 +947,11 @@ fn apply_ports(
     Ok(builder)
 }
 
+enum SecretInput {
+    Value(String),
+    Source(SecretSource),
+}
+
 fn apply_secret_options(
     ruby: &Ruby,
     mut builder: SandboxBuilder,
@@ -967,10 +972,38 @@ fn apply_secret_options(
                 ),
             ));
         }
-        let secret = required_keyword::<String>(spec, "value", ruby)?;
+        let secret = keyword::<String>(spec, "value")?;
+        let source =
+            keyword::<typed_data::Obj<RubySecretSource>>(spec, "source").map_err(|_| {
+                Error::new(
+                    ruby.exception_type_error(),
+                    format!("secret {env:?}: \"source\" must be a Microsandbox::SecretSource"),
+                )
+            })?;
+        let secret = match (secret, source) {
+            (Some(secret), None) => SecretInput::Value(secret),
+            (None, Some(source)) => SecretInput::Source(source.inner.clone()),
+            (Some(_), Some(_)) => {
+                return Err(argument_error(
+                    ruby,
+                    format!(
+                        "secret {env:?}: \"value\" and \"source\" are mutually exclusive; set at most one"
+                    ),
+                ));
+            }
+            (None, None) => {
+                return Err(argument_error(
+                    ruby,
+                    format!("secret {env:?}: set \"value\" or \"source\""),
+                ));
+            }
+        };
         let hosts = secret_allowed_hosts(ruby, spec, &env)?;
         builder = builder.secret(|s| {
-            let mut s = s.env(&env).value(secret);
+            let mut s = match secret {
+                SecretInput::Value(secret) => s.env(&env).value(secret),
+                SecretInput::Source(source) => s.env(&env).source(source),
+            };
             for host in &hosts {
                 s = if host == "*" {
                     s.allow_any_host_dangerous(true)
