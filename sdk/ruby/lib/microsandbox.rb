@@ -129,3 +129,4 @@ module Microsandbox
 end
 
 require_relative "microsandbox/jobs"
+require_relative "microsandbox/network"

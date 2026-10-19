@@ -15,8 +15,8 @@ use std::{
 };
 
 use magnus::{
-    Error, ExceptionClass, RArray, RHash, RObject, RString, Ruby, Symbol, TryConvert, Value,
-    function, method, prelude::*, r_hash::ForEach, scan_args::scan_args, typed_data,
+    Error, ExceptionClass, Integer, RArray, RHash, RObject, RString, Ruby, Symbol, TryConvert,
+    Value, function, method, prelude::*, r_hash::ForEach, scan_args::scan_args, typed_data,
 };
 use microsandbox_core::{
     AgentClientError, BackendKind, MicrosandboxError, MicrosandboxResult, Operation,
@@ -582,9 +582,299 @@ fn required_keyword<T: TryConvert>(hash: RHash, name: &str, ruby: &Ruby) -> Resu
 // Network / secrets
 // -------------------------------------------------------------------------------------------------
 
-fn restricted_network_policy(ruby: &Ruby, value: Value) -> Result<NetworkPolicy, Error> {
+const POLICY_KEYS: &[&str] = &["default_egress", "default_ingress", "rules"];
+
+#[derive(Clone, Copy)]
+enum RuleDirection {
+    Egress,
+    Ingress,
+    Any,
+}
+
+#[derive(Clone, Copy)]
+enum RuleProtocol {
+    Tcp,
+    Udp,
+    Icmpv4,
+    Icmpv6,
+}
+
+#[derive(Clone, Copy)]
+enum RuleGroup {
+    Public,
+    Loopback,
+    Private,
+    LinkLocal,
+    Metadata,
+    Multicast,
+    Host,
+}
+
+enum RuleDestination {
+    Any,
+    Ip(String),
+    Cidr(String),
+    Domain(String),
+    DomainSuffix(String),
+    Group(RuleGroup),
+}
+
+struct PolicyRule {
+    action: NetworkAction,
+    direction: RuleDirection,
+    destination: RuleDestination,
+    protocol: Option<RuleProtocol>,
+    port: Option<(u16, u16)>,
+}
+
+fn network_policy(ruby: &Ruby, value: Value) -> Result<NetworkPolicy, Error> {
     let hash = RHash::try_convert(value)
         .map_err(|_| argument_error(ruby, "network must be :none or a Hash"))?;
+    let keys = keyword_names(hash)?;
+    if keys.iter().any(|key| POLICY_KEYS.contains(&key.as_str())) {
+        rule_network_policy(ruby, hash)
+    } else {
+        restricted_network_policy(ruby, hash)
+    }
+}
+
+fn rule_network_policy(ruby: &Ruby, hash: RHash) -> Result<NetworkPolicy, Error> {
+    reject_unknown_keywords(ruby, hash, POLICY_KEYS)?;
+    let default_egress = match optional_string(hash, "default_egress")? {
+        Some(raw) => policy_action(ruby, &raw, "default_egress")?,
+        None => NetworkAction::Deny,
+    };
+    let default_ingress = match optional_string(hash, "default_ingress")? {
+        Some(raw) => policy_action(ruby, &raw, "default_ingress")?,
+        None => NetworkAction::Allow,
+    };
+
+    let mut rules = Vec::new();
+    if let Some(value) = hash.get(symbol("rules")).filter(|v| !v.is_nil()) {
+        let entries = RArray::from_value(value)
+            .ok_or_else(|| argument_error(ruby, "rules must be an Array of Hashes"))?;
+        for i in 0..entries.len() {
+            let entry: Value = entries.entry(i as isize)?;
+            let spec = RHash::from_value(entry)
+                .ok_or_else(|| argument_error(ruby, "rules entries must be Hashes"))?;
+            rules.push(policy_rule(ruby, spec)?);
+        }
+    }
+
+    let mut builder = NetworkPolicy::builder()
+        .default_egress(default_egress)
+        .default_ingress(default_ingress);
+    for rule in rules {
+        builder = builder.rule(move |rb| {
+            match rule.direction {
+                RuleDirection::Egress => rb.egress(),
+                RuleDirection::Ingress => rb.ingress(),
+                RuleDirection::Any => rb.any(),
+            };
+            match rule.protocol {
+                Some(RuleProtocol::Tcp) => rb.tcp(),
+                Some(RuleProtocol::Udp) => rb.udp(),
+                Some(RuleProtocol::Icmpv4) => rb.icmpv4(),
+                Some(RuleProtocol::Icmpv6) => rb.icmpv6(),
+                None => rb,
+            };
+            if let Some((start, end)) = rule.port {
+                rb.port_range(start, end);
+            }
+
+            let allow = matches!(rule.action, NetworkAction::Allow);
+            match rule.destination {
+                RuleDestination::Any if allow => rb.allow().any(),
+                RuleDestination::Any => rb.deny().any(),
+                RuleDestination::Ip(ip) if allow => rb.allow().ip(ip),
+                RuleDestination::Ip(ip) => rb.deny().ip(ip),
+                RuleDestination::Cidr(cidr) if allow => rb.allow().cidr(cidr),
+                RuleDestination::Cidr(cidr) => rb.deny().cidr(cidr),
+                RuleDestination::Domain(name) if allow => rb.allow().domain(name),
+                RuleDestination::Domain(name) => rb.deny().domain(name),
+                RuleDestination::DomainSuffix(name) if allow => rb.allow().domain_suffix(name),
+                RuleDestination::DomainSuffix(name) => rb.deny().domain_suffix(name),
+                RuleDestination::Group(group) => match group {
+                    RuleGroup::Public if allow => rb.allow_public(),
+                    RuleGroup::Public => rb.deny_public(),
+                    RuleGroup::Loopback if allow => rb.allow_loopback(),
+                    RuleGroup::Loopback => rb.deny_loopback(),
+                    RuleGroup::Private if allow => rb.allow_private(),
+                    RuleGroup::Private => rb.deny_private(),
+                    RuleGroup::LinkLocal if allow => rb.allow_link_local(),
+                    RuleGroup::LinkLocal => rb.deny_link_local(),
+                    RuleGroup::Metadata if allow => rb.allow_meta(),
+                    RuleGroup::Metadata => rb.deny_meta(),
+                    RuleGroup::Multicast if allow => rb.allow_multicast(),
+                    RuleGroup::Multicast => rb.deny_multicast(),
+                    RuleGroup::Host if allow => rb.allow_host(),
+                    RuleGroup::Host => rb.deny_host(),
+                },
+            }
+        });
+    }
+    builder
+        .build()
+        .map_err(|e| core_error(ruby, MicrosandboxError::from(e)))
+}
+
+fn policy_rule(ruby: &Ruby, spec: RHash) -> Result<PolicyRule, Error> {
+    reject_unknown_keywords(
+        ruby,
+        spec,
+        &["action", "direction", "destination", "protocol", "port"],
+    )?;
+    let action = string_value(required_keyword::<Value>(spec, "action", ruby)?, "action")?;
+    let action = policy_action(ruby, &action, "rule action")?;
+    let direction = match optional_string(spec, "direction")?.as_deref() {
+        None | Some("egress") => RuleDirection::Egress,
+        Some("ingress") => RuleDirection::Ingress,
+        Some("any") => RuleDirection::Any,
+        Some(other) => return Err(argument_error(ruby, format!("unknown direction: {other}"))),
+    };
+    let destination = match keyword::<Value>(spec, "destination")? {
+        Some(value) => policy_destination(ruby, value)?,
+        None => RuleDestination::Any,
+    };
+    let protocol = match optional_string(spec, "protocol")?.as_deref() {
+        None => None,
+        Some("tcp") => Some(RuleProtocol::Tcp),
+        Some("udp") => Some(RuleProtocol::Udp),
+        Some("icmpv4") => Some(RuleProtocol::Icmpv4),
+        Some("icmpv6") => Some(RuleProtocol::Icmpv6),
+        Some(other) => return Err(argument_error(ruby, format!("unknown protocol: {other}"))),
+    };
+    let port = keyword::<Value>(spec, "port")?
+        .map(|value| policy_port(ruby, value))
+        .transpose()?;
+    Ok(PolicyRule {
+        action,
+        direction,
+        destination,
+        protocol,
+        port,
+    })
+}
+
+fn optional_string(hash: RHash, name: &str) -> Result<Option<String>, Error> {
+    keyword::<Value>(hash, name)?
+        .map(|value| string_value(value, name))
+        .transpose()
+}
+
+fn policy_action(ruby: &Ruby, raw: &str, label: &str) -> Result<NetworkAction, Error> {
+    match raw {
+        "allow" => Ok(NetworkAction::Allow),
+        "deny" => Ok(NetworkAction::Deny),
+        other => Err(argument_error(ruby, format!("unknown {label}: {other}"))),
+    }
+}
+
+/// Integers are single ports; strings are `"443"` or an inclusive `"8000-9000"`.
+fn policy_port(ruby: &Ruby, value: Value) -> Result<(u16, u16), Error> {
+    let invalid = || argument_error(ruby, format!("invalid port or port range: {value}"));
+    if let Some(port) = Integer::from_value(value) {
+        let port = port
+            .to_i64()
+            .ok()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(invalid)?;
+        return Ok((port, port));
+    }
+    let raw = RString::from_value(value)
+        .ok_or_else(|| {
+            Error::new(
+                ruby.exception_type_error(),
+                "port must be an Integer or String",
+            )
+        })?
+        .to_string()?;
+    let (start, end) = raw.split_once('-').unwrap_or((&raw, &raw));
+    let start = start.trim().parse::<u16>().map_err(|_| invalid())?;
+    let end = end.trim().parse::<u16>().map_err(|_| invalid())?;
+    if start > end {
+        return Err(invalid());
+    }
+    Ok((start, end))
+}
+
+fn policy_destination(ruby: &Ruby, value: Value) -> Result<RuleDestination, Error> {
+    let Some(spec) = RHash::from_value(value) else {
+        let raw = string_value(value, "destination").map_err(|_| {
+            Error::new(
+                ruby.exception_type_error(),
+                "destination must be a String, Symbol, or Hash",
+            )
+        })?;
+        return shorthand_destination(raw);
+    };
+
+    reject_unknown_keywords(ruby, spec, &["kind", "value"])?;
+    let kind = string_value(required_keyword::<Value>(spec, "kind", ruby)?, "kind")?;
+    if kind == "any" {
+        return Ok(RuleDestination::Any);
+    }
+    let raw = optional_string(spec, "value")?.ok_or_else(|| {
+        argument_error(
+            ruby,
+            format!("value is required for destination kind `{kind}`"),
+        )
+    })?;
+    match kind.as_str() {
+        "ip" => Ok(RuleDestination::Ip(raw)),
+        "cidr" => Ok(RuleDestination::Cidr(raw)),
+        "domain" => Ok(RuleDestination::Domain(raw)),
+        "domain_suffix" | "domain-suffix" => Ok(RuleDestination::DomainSuffix(raw)),
+        "group" => rule_group(&raw)
+            .map(RuleDestination::Group)
+            .ok_or_else(|| argument_error(ruby, format!("unknown destination group: {raw}"))),
+        other => Err(argument_error(
+            ruby,
+            format!("unknown destination kind: {other}"),
+        )),
+    }
+}
+
+/// Same shorthand grammar as the Python SDK's string destinations.
+fn shorthand_destination(raw: String) -> Result<RuleDestination, Error> {
+    if raw == "*" {
+        return Ok(RuleDestination::Any);
+    }
+    if let Some(name) = raw.strip_prefix("domain=") {
+        return Ok(RuleDestination::Domain(name.to_string()));
+    }
+    if let Some(suffix) = raw.strip_prefix("suffix=") {
+        return Ok(RuleDestination::DomainSuffix(suffix.to_string()));
+    }
+    if let Some(group) = rule_group(&raw) {
+        return Ok(RuleDestination::Group(group));
+    }
+    if raw.starts_with('.') {
+        return Ok(RuleDestination::DomainSuffix(raw));
+    }
+    if raw.contains('/') {
+        return Ok(RuleDestination::Cidr(raw));
+    }
+    if raw.parse::<IpAddr>().is_ok() {
+        return Ok(RuleDestination::Ip(raw));
+    }
+    Ok(RuleDestination::Domain(raw))
+}
+
+fn rule_group(raw: &str) -> Option<RuleGroup> {
+    match raw {
+        "public" => Some(RuleGroup::Public),
+        "loopback" => Some(RuleGroup::Loopback),
+        "private" => Some(RuleGroup::Private),
+        "link-local" | "link_local" => Some(RuleGroup::LinkLocal),
+        "metadata" => Some(RuleGroup::Metadata),
+        "multicast" => Some(RuleGroup::Multicast),
+        "host" => Some(RuleGroup::Host),
+        _ => None,
+    }
+}
+
+fn restricted_network_policy(ruby: &Ruby, hash: RHash) -> Result<NetworkPolicy, Error> {
     reject_unknown_keywords(ruby, hash, &["allowed_hosts", "allowed_ports"])?;
     let hosts: Vec<String> = required_keyword::<RArray>(hash, "allowed_hosts", ruby)?
         .to_vec::<String>()
@@ -927,7 +1217,7 @@ fn apply_builder_options(
             }
             builder = builder.disable_network();
         } else {
-            let policy = restricted_network_policy(ruby, net)?;
+            let policy = network_policy(ruby, net)?;
             builder = builder.network(|n| n.policy(policy));
         }
     }

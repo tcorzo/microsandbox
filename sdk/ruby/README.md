@@ -169,6 +169,29 @@ sandbox = Microsandbox::Sandbox.create(
 )
 ```
 
+For anything the allowlist cannot express, pass policy rules instead. Rules
+match in order, and the first match wins. Egress defaults to deny and ingress
+to allow. A destination is a group (`host`, `private`, `public`, ...), an IP, a
+CIDR, a domain, or a domain suffix such as `.github.com`:
+
+```ruby
+sandbox = Microsandbox::Sandbox.create(
+  "collector-client",
+  image: "alpine",
+  network: {
+    rules: [
+      *Microsandbox::Rule.allow_dns,
+      { action: :allow, destination: "172.28.0.0/16", protocol: :tcp },
+      Microsandbox::Rule.allow(destination: Microsandbox::Destination.group(:host), protocol: :tcp, port: 4318)
+    ]
+  }
+)
+```
+
+A CIDR or group rule without a `port` also lets DNS answers with private
+addresses through rebind protection, so names of services on that network
+resolve.
+
 The guest receives a placeholder for each secret. The host proxy substitutes
 the real value only for the allowed TLS hostname. Secret values persist in
 host-side sandbox configuration, so load them from a secret manager, never log
