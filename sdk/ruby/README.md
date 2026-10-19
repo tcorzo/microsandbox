@@ -164,15 +164,18 @@ sandbox = Microsandbox::Sandbox.create(
   secrets: [{
     env: "API_KEY",
     value: ENV.fetch("API_KEY"),
-    allowed_host: "api.example.com"
+    allowed_hosts: ["api.example.com"]
   }]
 )
 ```
 
 The guest receives a placeholder for each secret. The host proxy substitutes
-the real value only for the allowed TLS hostname. Secret values persist in
-host-side sandbox configuration, so load them from a secret manager, never log
-them, and rotate them after suspected host compromise.
+the real value only for the allowed TLS hostnames. List every host for a
+secret in one entry's `allowed_hosts`; two entries for the same `env` raise
+`ArgumentError`. `allowed_host: "api.example.com"` remains a single-host
+form. Secret values persist in host-side sandbox configuration, so load them
+from a secret manager, never log them, and rotate them after suspected host
+compromise.
 
 Route outbound TCP through an HTTP CONNECT proxy with
 `proxy: Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")`. The
