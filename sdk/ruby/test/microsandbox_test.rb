@@ -71,6 +71,80 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_raise(ArgumentError) { Microsandbox::SecretSource.env("") }
   end
 
+  def test_secret_allowed_hosts_build_one_entry_with_every_host
+    script = <<~RUBY
+      require "json"
+      require "socket"
+      require "microsandbox"
+      server = TCPServer.new("127.0.0.1", 0)
+      capture = Thread.new do
+        client = server.accept
+        head = +""
+        head << client.gets until head.end_with?("\\r\\n\\r\\n")
+        body = client.read(head[/content-length: (\\d+)/i, 1].to_i)
+        client.write("HTTP/1.1 500 Internal Server Error\\r\\ncontent-length: 0\\r\\nconnection: close\\r\\n\\r\\n")
+        client.close
+        body
+      end
+      Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:\#{server.addr[1]}")
+      begin
+        Microsandbox::Sandbox.create("ruby-test", image: "alpine", secrets: [
+          { env: "GITHUB_TOKEN", value: "token", allowed_hosts: ["github.com", "*.githubusercontent.com"] },
+          { env: "API_KEY", value: "key", allowed_host: "api.example.com" },
+          { env: "ANY_HOST_KEY", value: "any", allowed_hosts: ["*"] }
+        ])
+      rescue Microsandbox::CloudHttpError
+        nil
+      end
+      JSON.parse(capture.value).dig("network", "secrets", "entries").each do |entry|
+        puts [entry["env_var"], *entry["allowed_hosts"].map { |host| "\#{host["type"]}:\#{host["value"]}" }].join(" ")
+      end
+    RUBY
+    lib = File.expand_path("../lib", __dir__)
+
+    output = IO.popen([RbConfig.ruby, "-I", lib, "-e", script], &:read)
+
+    assert_true $?.success?
+    assert_equal [
+      "GITHUB_TOKEN exact:github.com wildcard:*.githubusercontent.com",
+      "API_KEY exact:api.example.com",
+      "ANY_HOST_KEY any:"
+    ], output.lines(chomp: true)
+  end
+
+  def test_secret_rejects_a_second_entry_for_the_same_env
+    secrets = [
+      { env: "GITHUB_TOKEN", value: "token", allowed_host: "github.com" },
+      { env: "GITHUB_TOKEN", value: "token", allowed_host: "api.github.com" }
+    ]
+
+    error = assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("ruby-test", image: "alpine", secrets: secrets)
+    end
+
+    assert_equal 'secret "GITHUB_TOKEN": more than one entry uses this env; list all its hosts in :allowed_hosts',
+                 error.message
+  end
+
+  def test_secret_allowed_hosts_shapes_are_validated
+    cases = {
+      { allowed_host: "a.example.com", allowed_hosts: ["b.example.com"] } =>
+        [ArgumentError, 'secret "API_KEY": :allowed_host and :allowed_hosts are mutually exclusive; set one'],
+      {} => [ArgumentError, "missing keyword: :allowed_hosts"],
+      { allowed_hosts: [] } =>
+        [ArgumentError, 'secret "API_KEY": requires at least one allowed host or allowed host pattern'],
+      { allowed_hosts: "api.example.com" } => [TypeError, "allowed_hosts must be an Array"],
+      { allowed_hosts: ["api.example.com", 1] } => [TypeError, "allowed_hosts must contain only Strings"]
+    }
+
+    cases.each do |hosts, (error_class, message)|
+      error = assert_raise(error_class) do
+        Microsandbox::Sandbox.create("ruby-test", image: "alpine", secrets: [{ env: "API_KEY", value: "v", **hosts }])
+      end
+      assert_equal message, error.message
+    end
+  end
+
   def test_create_accepts_proxy_keyword
     proxy = Microsandbox::OutboundProxy.socks5("not-an-address")
 

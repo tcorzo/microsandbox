@@ -114,6 +114,29 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox&.stop
   end
 
+  def test_secret_with_several_allowed_hosts_is_substituted_on_each
+    secret = "ruby-secret-#{SecureRandom.hex(8)}"
+    hosts = ["httpbingo.org", "postman-echo.com"]
+    sandbox = create_sandbox(
+      "secret-hosts",
+      network: { allowed_hosts: hosts, allowed_ports: [443] },
+      secrets: [{ env: "API_KEY", value: secret, allowed_hosts: hosts }]
+    )
+
+    responses = hosts.map do |host|
+      sandbox.shell(
+        "for attempt in 1 2 3; do wget -qO- --timeout=15 --header=\"Authorization: Bearer $API_KEY\" https://#{host}/headers && break; sleep 1; done"
+      )
+    end
+
+    responses.each do |response|
+      assert_include response.stdout, secret
+      assert_not_include response.stdout, "MSB_API_KEY"
+    end
+  ensure
+    sandbox&.stop
+  end
+
   def test_gc_stops_owned_sandbox_and_detach_keeps_it_running
     owned_name = unique_name("gc-owned")
     @names << owned_name

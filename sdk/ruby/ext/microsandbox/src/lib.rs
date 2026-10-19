@@ -1,6 +1,7 @@
 mod jobs;
 
 use std::{
+    collections::HashSet,
     ffi::c_void,
     future::Future,
     mem::ManuallyDrop,
@@ -953,14 +954,59 @@ fn apply_secret_options(
 ) -> Result<SandboxBuilder, Error> {
     let secrets = RArray::try_convert(value)
         .map_err(|_| argument_error(ruby, "secrets must be an Array of Hashes"))?;
+    let mut envs = HashSet::new();
     for i in 0..secrets.len() {
         let spec: RHash = secrets.entry(i as isize)?;
         let env = required_keyword::<String>(spec, "env", ruby)?;
+        // The SDK merges entries by env var and keeps only the last entry's hosts.
+        if !envs.insert(env.clone()) {
+            return Err(argument_error(
+                ruby,
+                format!(
+                    "secret {env:?}: more than one entry uses this env; list all its hosts in :allowed_hosts"
+                ),
+            ));
+        }
         let secret = required_keyword::<String>(spec, "value", ruby)?;
-        let host = required_keyword::<String>(spec, "allowed_host", ruby)?;
-        builder = builder.secret_env(env, secret, host);
+        let hosts = secret_allowed_hosts(ruby, spec, &env)?;
+        builder = builder.secret(|s| {
+            let mut s = s.env(&env).value(secret);
+            for host in &hosts {
+                s = if host == "*" {
+                    s.allow_any_host_dangerous(true)
+                } else {
+                    s.allow(host)
+                };
+            }
+            s
+        });
     }
     Ok(builder)
+}
+
+fn secret_allowed_hosts(ruby: &Ruby, spec: RHash, env: &str) -> Result<Vec<String>, Error> {
+    let host = keyword::<String>(spec, "allowed_host")?;
+    let hosts = spec.get(symbol("allowed_hosts")).filter(|v| !v.is_nil());
+    let hosts = match (host, hosts) {
+        (Some(_), Some(_)) => {
+            return Err(argument_error(
+                ruby,
+                format!(
+                    "secret {env:?}: :allowed_host and :allowed_hosts are mutually exclusive; set one"
+                ),
+            ));
+        }
+        (Some(host), None) => vec![host],
+        (None, Some(hosts)) => string_array(hosts, "allowed_hosts")?,
+        (None, None) => return Err(argument_error(ruby, "missing keyword: :allowed_hosts")),
+    };
+    if hosts.is_empty() {
+        return Err(argument_error(
+            ruby,
+            format!("secret {env:?}: requires at least one allowed host or allowed host pattern"),
+        ));
+    }
+    Ok(hosts)
 }
 
 #[derive(Clone)]
